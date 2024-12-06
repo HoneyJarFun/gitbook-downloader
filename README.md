@@ -1,11 +1,18 @@
-# Gitbook Documentation Downloader
+# Gitbook Documentation Downloader for LLMs
 
-A web application that allows you to download and convert Gitbook documentation into markdown format.
+A web application that converts Gitbook documentation into markdown format, optimized for use with Large Language Models (LLMs) like ChatGPT, Claude, and LLaMA.
+
+## Purpose
+
+- Download technical documentation for training custom LLMs
+- Create knowledge bases for ChatGPT, Claude, and other AI assistants
+- Feed documentation into context windows of AI chatbots
+- Generate markdown files optimized for LLM processing
 
 ## Features
 
 - Scrape Gitbook documentation sites
-- Convert HTML content to markdown format
+- Convert HTML content to LLM-friendly markdown format
 - View converted content in browser
 - Download documentation as a single markdown file
 - Handles internal links and navigation
@@ -34,6 +41,12 @@ python app.py
    - View the converted content in your browser
    - Download the content as a markdown file
 
+5. Use the downloaded markdown with:
+   - ChatGPT (paste into conversation)
+   - Claude (upload as a file)
+   - Custom LLaMA models (include in training data)
+   - Any other LLM that accepts markdown input
+
 ## Technical Details
 
 The application uses:
@@ -44,4 +57,4 @@ The application uses:
 
 ## Note
 
-This tool is designed for Gitbook-based documentation sites. It may not work correctly with other documentation platforms.
+This tool is designed specifically for Gitbook-based documentation sites and optimized for LLM consumption. It may not work correctly with other documentation platforms.
