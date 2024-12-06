@@ -9,13 +9,17 @@ import logging
 from typing import Dict, Optional, List, Set
 from dataclasses import dataclass
 from datetime import datetime
-from markdownify import markdownify as md
+import markdownify
 import asyncio
 import aiohttp
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 import time
 from contextlib import contextmanager
+
+# Configure logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 @contextmanager
 def timeout(seconds=0, minutes=0, hours=0):
@@ -80,86 +84,170 @@ class GitbookDownloader:
         self.delay = 1  # Delay between requests in seconds
         self.max_retries = 3
         self.retry_delay = 2  # Initial retry delay in seconds
-        self.pages = []  # Store page titles and content
-        self.current_index = 0  # Track page order
+        self.pages = {}  # Store page titles and content
+        self.content_hash = {}  # Track content hashes
 
     async def download(self):
         """Main download method"""
         try:
-            async with aiohttp.ClientSession() as session:
-                self.session = session
-                self.status.status = 'running'
-                
-                # Get initial page and parse navigation
+            self.status.start_time = time.time()
+            self.status.status = "downloading"
+            self.visited_urls = set()  # Track visited URLs
+            
+            # Create aiohttp session
+            async with aiohttp.ClientSession() as self.session:
+                # First get the main page
                 initial_content = await self._fetch_page(self.base_url)
                 if not initial_content:
-                    raise Exception("Failed to fetch initial page")
+                    raise Exception("Failed to fetch main page")
                 
-                nav_links = self._extract_nav_links(initial_content)
-                self.status.total_pages = len(nav_links) if nav_links else 1
+                # Extract navigation links
+                nav_links = await self._extract_nav_links(initial_content)
+                self.status.total_pages = len(nav_links) + 1  # +1 for main page
                 
-                # Create output file
-                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                domain = urlparse(self.base_url).netloc
-                self.output_file = f'output_{domain}_{timestamp}.md'
+                # Process main page
+                main_page = await self._process_page_content(self.base_url, initial_content)
+                if main_page:
+                    self.pages[0] = {'index': 0, **main_page}
+                    self.status.pages_scraped.append(main_page['title'])
+                    self.visited_urls.add(self.base_url)
                 
-                # Process each page
-                if not nav_links:  # Single page
-                    title, content, index = await self._process_page_content(initial_content, self.base_url)
-                    if content:
-                        self.pages.append({
-                            'index': index,
-                            'title': title,
-                            'content': content,
-                            'url': self.base_url
-                        })
-                        self.status.pages_scraped.append(title)
-                else:
-                    for i, link in enumerate(nav_links, 1):
+                # Process other pages
+                page_index = 1
+                for link in nav_links:
+                    try:
+                        # Skip if URL already processed
                         if link in self.visited_urls:
                             continue
                             
-                        self.status.current_page = i
+                        self.status.current_page = page_index
                         self.status.current_url = link
                         
-                        try:
-                            page_content = await self._fetch_page(link)
-                            if page_content:
-                                title, content, index = await self._process_page_content(page_content, link)
-                                if content:
-                                    self.pages.append({
-                                        'index': index,
-                                        'title': title,
-                                        'content': content,
-                                        'url': link
-                                    })
-                                    self.status.pages_scraped.append(title)
-                            else:
-                                logging.warning(f"Failed to fetch page: {link}")
-                        except Exception as e:
-                            logging.error(f"Error processing page {link}: {str(e)}")
-                            continue  # Skip to next page on error
+                        # Add delay between requests
+                        await asyncio.sleep(self.delay)
+                        
+                        content = await self._fetch_page(link)
+                        if content:
+                            page_data = await self._process_page_content(link, content)
+                            if page_data:
+                                # Check for duplicate content
+                                content_hash = hash(page_data['content'])
+                                if content_hash not in self.content_hash:
+                                    self.pages[page_index] = {'index': page_index, **page_data}
+                                    self.status.pages_scraped.append(page_data['title'])
+                                    self.content_hash[content_hash] = page_index
+                                    page_index += 1
+                                
+                        self.visited_urls.add(link)
                             
-                        await asyncio.sleep(self.delay)  # Rate limiting delay
+                    except Exception as e:
+                        logger.error(f"Error processing page {link}: {str(e)}")
+                        continue
                 
-                # Generate final markdown
-                if self.pages:
-                    self.status.status = 'generating_markdown'
-                    markdown_content = self._generate_markdown()
-                    with open(self.output_file, 'w', encoding='utf-8') as f:
-                        f.write(markdown_content)
-                    self.status.status = 'completed'
-                    self.status.output_file = self.output_file
-                else:
-                    raise Exception("No content was successfully downloaded")
+                # Generate markdown
+                markdown_content = self._generate_markdown()
+                if not markdown_content:
+                    raise Exception("Failed to generate markdown content")
                 
-                return self.output_file
+                self.status.status = "completed"
+                return markdown_content
                 
         except Exception as e:
-            self.status.status = 'error'
+            self.status.status = "error"
             self.status.error = str(e)
-            logging.error(f"Download failed: {str(e)}")
+            logger.error(f"Download failed: {str(e)}")
             raise
+
+    async def _process_page_content(self, url, content):
+        """Process the content of a page"""
+        try:
+            soup = BeautifulSoup(content, 'html.parser')
+            
+            # Extract title
+            title = None
+            h1 = soup.find('h1')
+            if h1:
+                title = h1.get_text(strip=True)
+            if not title:
+                title_tag = soup.find('title')
+                if title_tag:
+                    # Clean up title - remove site name and extra parts
+                    title = title_tag.get_text(strip=True)
+                    title = re.split(r'[|\-–]', title)[0].strip()
+            if not title:
+                title = urlparse(url).path.split('/')[-1] or "Introduction"
+            
+            # Get main content
+            main_content = soup.find(['main', 'article'])
+            if not main_content:
+                main_content = soup.find('div', {'class': ['markdown', 'content', 'article', 'documentation']})
+            if not main_content:
+                main_content = soup
+            
+            # Remove navigation elements
+            for nav in main_content.find_all(['nav', 'aside', 'header', 'footer']):
+                nav.decompose()
+            
+            # Remove scripts and styles
+            for tag in main_content.find_all(['script', 'style']):
+                tag.decompose()
+                
+            # Remove navigation links at bottom
+            for link in main_content.find_all('a', text=re.compile(r'Previous|Next')):
+                link.decompose()
+            
+            # Convert to markdown
+            content_html = str(main_content)
+            md = markdownify.markdownify(content_html, heading_style="atx")
+            
+            # Clean up markdown
+            md = re.sub(r'\n{3,}', '\n\n', md)  # Remove extra newlines
+            md = re.sub(r'#{3,}', '##', md)     # Normalize heading levels
+            
+            return {
+                'title': title,
+                'content': md,
+                'url': url
+            }
+            
+        except Exception as e:
+            logger.error(f"Error processing page content: {str(e)}")
+            return None
+
+    def _generate_markdown(self):
+        """Generate markdown content from downloaded pages"""
+        if not self.pages:
+            return ""
+        
+        markdown_parts = []
+        seen_titles = set()
+        
+        # Add table of contents
+        markdown_parts.append("# Table of Contents\n")
+        for page in sorted(self.pages.values(), key=lambda x: x['index']):
+            if page.get('title'):
+                title = page['title'].strip()
+                if title and title not in seen_titles:
+                    markdown_parts.append(f"- [{title}](#{slugify(title)})")
+                    seen_titles.add(title)
+        
+        markdown_parts.append("\n---\n")
+        
+        # Add content
+        seen_titles.clear()
+        for page in sorted(self.pages.values(), key=lambda x: x['index']):
+            if page.get('title') and page.get('content'):
+                title = page['title'].strip()
+                content = page['content'].strip()
+                
+                if title and title not in seen_titles:
+                    markdown_parts.append(f"\n# {title}")
+                    markdown_parts.append(f"\nSource: {page['url']}\n")
+                    markdown_parts.append(content)
+                    markdown_parts.append("\n---\n")
+                    seen_titles.add(title)
+        
+        return "\n".join(markdown_parts)
 
     async def _fetch_page(self, url):
         """Fetch a page with retry logic"""
@@ -195,125 +283,56 @@ class GitbookDownloader:
         
         return None
 
-    def _extract_nav_links(self, content):
-        """Extract navigation links from page content"""
+    async def _extract_nav_links(self, content):
+        """Extract navigation links from GitBook page content"""
         try:
             soup = BeautifulSoup(content, 'html.parser')
-            nav_links = set()
+            nav_links = []
+            processed_urls = set()
             
-            # Find navigation elements
+            # Find GitBook navigation elements
             nav_elements = soup.find_all(['nav', 'aside'])
             for nav in nav_elements:
-                for a in nav.find_all('a', href=True):
-                    href = a['href']
+                # Look for ordered lists that typically contain the navigation
+                nav_lists = nav.find_all(['ol', 'ul'])
+                for nav_list in nav_lists:
+                    # Process list items in order
+                    for li in nav_list.find_all('li', recursive=False):
+                        link = li.find('a', href=True)
+                        if link:
+                            href = link['href']
+                            # Handle relative and absolute URLs
+                            if href.startswith('/'):
+                                full_url = f"{self.base_url}{href}"
+                            elif href.startswith(self.base_url):
+                                full_url = href
+                            else:
+                                continue
+                                
+                            # Skip duplicate URLs and fragments
+                            if full_url not in processed_urls and not href.startswith('#'):
+                                nav_links.append(full_url)
+                                processed_urls.add(full_url)
+            
+            # Also check for next/prev navigation links
+            next_links = soup.find_all('a', {'aria-label': ['Next', 'Previous', 'next', 'previous']})
+            for link in next_links:
+                href = link.get('href')
+                if href:
                     if href.startswith('/'):
                         full_url = f"{self.base_url}{href}"
-                        nav_links.add(full_url)
                     elif href.startswith(self.base_url):
-                        nav_links.add(href)
+                        full_url = href
+                    else:
+                        continue
+                        
+                    if full_url not in processed_urls and not href.startswith('#'):
+                        nav_links.append(full_url)
+                        processed_urls.add(full_url)
             
-            return list(nav_links)
+            # Remove duplicates while preserving order
+            return list(dict.fromkeys(nav_links))
+            
         except Exception as e:
-            logging.error(f"Error extracting nav links: {str(e)}")
+            logger.error(f"Error extracting nav links: {str(e)}")
             return []
-
-    async def _process_page_content(self, content, url):
-        """Process page content and convert to markdown"""
-        try:
-            soup = BeautifulSoup(content, 'html.parser')
-            
-            # Remove unnecessary elements
-            for element in soup.find_all(['script', 'style', 'nav', 'footer', 'header']):
-                element.decompose()
-            
-            # Extract title
-            title = soup.find('h1')
-            if not title:
-                title = soup.find('title')
-            if title:
-                title = title.get_text().strip()
-            else:
-                title = urlparse(url).path.split('/')[-1] or "Home"
-            
-            # Find main content
-            main_content = soup.find('main') or soup.find('article') or soup.find('div', class_=['content', 'markdown-body', 'documentation'])
-            if not main_content:
-                main_content = soup.find('div', {'role': 'main'})
-            if not main_content:
-                main_content = soup
-            
-            # Convert to markdown
-            markdown = md(str(main_content))
-            clean_markdown = self._clean_markdown(markdown)
-            
-            # Store with index
-            index = self.current_index
-            self.current_index += 1
-            
-            return title, clean_markdown, index
-            
-        except Exception as e:
-            logging.error(f"Error processing page content: {str(e)}")
-            return None, None, None
-
-    def _clean_markdown(self, markdown_text):
-        """Clean up markdown content"""
-        try:
-            # Remove multiple blank lines
-            markdown_text = re.sub(r'\n\s*\n\s*\n', '\n\n', markdown_text)
-            
-            # Remove HTML comments
-            markdown_text = re.sub(r'<!--.*?-->', '', markdown_text, flags=re.DOTALL)
-            
-            # Fix heading levels (ensure proper hierarchy)
-            lines = markdown_text.split('\n')
-            cleaned_lines = []
-            for line in lines:
-                if line.strip().startswith('#'):
-                    # Ensure at least one space after #
-                    line = re.sub(r'^(#+)(\S)', r'\1 \2', line)
-                cleaned_lines.append(line)
-            
-            markdown_text = '\n'.join(cleaned_lines)
-            
-            # Fix list formatting
-            markdown_text = re.sub(r'^\s*[-*+]\s*', '- ', markdown_text, flags=re.MULTILINE)
-            
-            return markdown_text.strip()
-            
-        except Exception as e:
-            logging.error(f"Error cleaning markdown: {str(e)}")
-            return markdown_text
-
-    def _generate_markdown(self):
-        """Generate final markdown document"""
-        try:
-            parts = []
-            
-            # Add title and metadata
-            parts.append(f"# {urlparse(self.base_url).netloc} Documentation")
-            parts.append(f"Downloaded from: {self.base_url}")
-            parts.append(f"Downloaded at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-            parts.append(f"Total pages: {len(self.pages)}\n")
-            
-            # Sort pages by index
-            sorted_pages = sorted(self.pages, key=lambda x: x.get('index', 0))
-            
-            # Add table of contents
-            parts.append("## Table of Contents")
-            for page in sorted_pages:
-                parts.append(f"- [{page['title']}](#{slugify(page['title'])})")
-            parts.append("")
-            
-            # Add content sections
-            for page in sorted_pages:
-                parts.append(f"## {page['title']}")
-                parts.append(f"Source: {page['url']}\n")
-                parts.append(page['content'])
-                parts.append("\n---\n")
-            
-            return '\n'.join(parts)
-            
-        except Exception as e:
-            logging.error(f"Error generating markdown: {str(e)}")
-            return "Error generating markdown document"

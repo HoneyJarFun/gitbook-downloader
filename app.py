@@ -8,6 +8,7 @@ import asyncio
 import concurrent.futures
 import sys
 from urllib.parse import quote, unquote
+from urllib.parse import urlparse
 
 # Configure logging
 logging.basicConfig(
@@ -195,27 +196,22 @@ def download_markdown(task_id):
         
         try:
             # Generate fresh markdown content
-            if hasattr(downloader, 'pages') and downloader.pages:
-                content = downloader._generate_markdown()
-                
-                # Create filename from URL
-                url = downloader.base_url.rstrip('/')
-                domain = url.split('//')[1].replace('/', '_')
-                filename = f"{domain}.md"
-                
-                # Create a temporary file with the content
-                temp_file = f'temp_{filename}'
-                with open(temp_file, 'w', encoding='utf-8') as f:
-                    f.write(content)
-                
-                return send_file(
-                    temp_file,
-                    as_attachment=True,
-                    download_name=filename,
-                    mimetype='text/markdown'
-                )
-            else:
+            content = downloader._generate_markdown()
+            if not content:
                 return jsonify({"error": "No content available"}), 404
+                
+            # Create a temporary file with the content
+            domain = urlparse(downloader.base_url).netloc
+            temp_file = f'temp_{domain}.md'
+            with open(temp_file, 'w', encoding='utf-8') as f:
+                f.write(str(content))  # Ensure content is string
+            
+            return send_file(
+                temp_file,
+                as_attachment=True,
+                download_name=f"{domain}.md",
+                mimetype='text/markdown'
+            )
                 
         except Exception as e:
             logger.error(f"Error sending file: {str(e)}")
