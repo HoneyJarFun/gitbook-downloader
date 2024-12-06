@@ -1,9 +1,6 @@
 # Log files
 *.log
 
-# Markdown files
-*.md
-
 # Python cache
 __pycache__/
 *.py[cod]
