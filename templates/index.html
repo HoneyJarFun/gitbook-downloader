@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Gitbook Documentation Downloader</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        .hidden { display: none; }
+        #progress-container {
+            margin-top: 20px;
+            padding: 20px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            background-color: #f8f9fa;
+        }
+        .page-list {
+            max-height: 200px;
+            overflow-y: auto;
+            margin-top: 10px;
+            padding: 10px;
+            border: 1px solid #eee;
+            border-radius: 4px;
+        }
+        .error-message {
+            color: #dc3545;
+            margin-top: 10px;
+            padding: 10px;
+            border: 1px solid #dc3545;
+            border-radius: 4px;
+            background-color: #f8d7da;
+        }
+        .warning-message {
+            color: #856404;
+            margin-top: 10px;
+            padding: 10px;
+            border: 1px solid #ffeeba;
+            border-radius: 4px;
+            background-color: #fff3cd;
+        }
+        .markdown-preview {
+            min-height: 400px;
+            max-height: 600px;
+            overflow-y: auto;
+            padding: 1rem;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            background-color: #fff;
+        }
+        .status-badge {
+            padding: 0.25rem 0.5rem;
+            border-radius: 0.25rem;
+            font-size: 0.875rem;
+            font-weight: 500;
+        }
+        .status-running {
+            background-color: #cff4fc;
+            color: #055160;
+        }
+        .status-completed {
+            background-color: #d1e7dd;
+            color: #0f5132;
+        }
+        .status-error {
+            background-color: #f8d7da;
+            color: #842029;
+        }
+        .status-rate-limited {
+            background-color: #fff3cd;
+            color: #664d03;
+        }
+        .page-item {
+            padding: 5px;
+            border-bottom: 1px solid #eee;
+        }
+        .page-item:last-child {
+            border-bottom: none;
+        }
+        .checkmark {
+            font-size: 1.2rem;
+            margin-right: 5px;
+            color: #2ecc71;
+        }
+    </style>
+</head>
+<body>
+    <div class="container mt-5">
+        <h1 class="mb-4">Gitbook Documentation Downloader</h1>
+        
+        <div class="row">
+            <div class="col-md-4">
+                <div class="card">
+                    <div class="card-body">
+                        <form id="download-form" class="mb-3">
+                            <div class="mb-3">
+                                <label for="url" class="form-label">Documentation URL</label>
+                                <input type="url" class="form-control" id="url" name="url" required 
+                                       placeholder="https://docs.example.com">
+                            </div>
+                            <button type="submit" class="btn btn-primary w-100">
+                                Download Documentation
+                            </button>
+                        </form>
+                        
+                        <div id="progress-container" class="hidden">
+                            <div class="d-flex justify-content-between align-items-center mb-3">
+                                <h5 class="mb-0">Download Progress</h5>
+                                <span id="status-badge" class="status-badge"></span>
+                            </div>
+                            
+                            <div class="progress mb-3">
+                                <div class="progress-bar progress-bar-striped progress-bar-animated" 
+                                     role="progressbar" style="width: 0%">
+                                    0%
+                                </div>
+                            </div>
+                            
+                            <div class="d-flex justify-content-between text-muted small">
+                                <div id="pages-count">Pages: 0/0</div>
+                                <div id="elapsed-time">Time: 0s</div>
+                            </div>
+                            
+                            <div id="rate-limit-warning" class="warning-message hidden">
+                                Rate limit exceeded. Waiting <span id="retry-after">60</span> seconds before retrying...
+                            </div>
+                            
+                            <div class="page-list mt-3">
+                                <ul id="pages-list" class="list-unstyled mb-0"></ul>
+                            </div>
+                            
+                            <div id="error-container" class="error-message hidden"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="col-md-8">
+                <div class="card">
+                    <div class="card-body">
+                        <div class="d-flex justify-content-between align-items-center mb-3">
+                            <h5 class="mb-0">Documentation Preview</h5>
+                            <button id="download-markdown-btn" class="btn btn-success hidden">
+                                <i class="bi bi-download"></i> Download Markdown
+                            </button>
+                        </div>
+                        <div id="markdown-content" class="markdown-preview">
+                            <div class="text-muted text-center py-5">
+                                Documentation content will appear here
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script>
+        let taskId = null;
+        let startTime = null;
+        let statusCheckInterval = null;
+        let previewInterval;
+
+        async function startDownload(event) {
+            event.preventDefault();
+            const url = document.getElementById('url').value.trim();
+            if (!url) {
+                showError('Please enter a URL');
+                return;
+            }
+
+            // Reset UI
+            document.getElementById('progress-container').classList.remove('hidden');
+            document.getElementById('error-container').classList.add('hidden');
+            document.getElementById('rate-limit-warning').classList.add('hidden');
+            document.getElementById('download-markdown-btn').classList.add('hidden');
+            document.getElementById('pages-list').innerHTML = '';
+            document.querySelector('.progress-bar').style.width = '0%';
+            document.querySelector('.progress-bar').textContent = '0%';
+
+            try {
+                const response = await fetch('/download', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ url })
+                });
+
+                const data = await handleResponse(response);
+                taskId = data.task_id;
+                startTime = Date.now();
+                startStatusCheck();
+                startPreviewUpdates();
+                updateStatusBadge('running');
+            } catch (error) {
+                showError(error.message);
+            }
+        }
+
+        function startStatusCheck() {
+            if (statusCheckInterval) {
+                clearInterval(statusCheckInterval);
+            }
+            checkStatus(); // Check immediately
+            statusCheckInterval = setInterval(checkStatus, 1000);
+        }
+
+        async function checkStatus() {
+            if (!taskId) return;
+            
+            try {
+                const response = await fetch(`/status/${encodeURIComponent(taskId)}`);
+                const data = await handleResponse(response);
+                
+                updateProgress(data);
+                updateStatusBadge(data.status);
+                
+                if (data.status === 'completed') {
+                    clearInterval(statusCheckInterval);
+                    await showMarkdownContent();
+                    document.getElementById('download-markdown-btn').classList.remove('hidden');
+                    stopPreviewUpdates();
+                } else if (data.status === 'error') {
+                    clearInterval(statusCheckInterval);
+                    showError(data.error || 'Download failed');
+                } else if (data.rate_limit_reset) {
+                    document.getElementById('rate-limit-warning').classList.remove('hidden');
+                    document.getElementById('retry-after').textContent = data.rate_limit_reset;
+                    updateStatusBadge('rate_limited');
+                }
+            } catch (error) {
+                showError(error.message);
+                clearInterval(statusCheckInterval);
+            }
+        }
+
+        async function showMarkdownContent() {
+            try {
+                const response = await fetch(`/result/${encodeURIComponent(taskId)}`);
+                if (!response.ok) {
+                    throw new Error('Failed to load content');
+                }
+                const content = await response.text();
+                document.getElementById('markdown-content').innerHTML = marked.parse(content);
+            } catch (error) {
+                showError('Failed to load content: ' + error.message);
+            }
+        }
+
+        function updatePreview() {
+            if (taskId) {
+                fetch(`/result/${taskId}`)
+                    .then(response => {
+                        if (response.ok) {
+                            return response.text();
+                        }
+                        throw new Error('Preview not available yet');
+                    })
+                    .then(content => {
+                        document.getElementById('markdown-content').innerHTML = marked.parse(content);
+                    })
+                    .catch(error => {
+                        console.log('Preview error:', error);
+                    });
+            }
+        }
+
+        function startPreviewUpdates() {
+            previewInterval = setInterval(updatePreview, 2000);
+        }
+        
+        function stopPreviewUpdates() {
+            if (previewInterval) {
+                clearInterval(previewInterval);
+            }
+        }
+
+        document.getElementById('download-markdown-btn').addEventListener('click', function() {
+            if (taskId) {
+                window.location.href = `/download/${encodeURIComponent(taskId)}/markdown`;
+            }
+        });
+
+        function updateProgress(data) {
+            const progressBar = document.querySelector('.progress-bar');
+            const pagesList = document.getElementById('pages-list');
+            const progressContainer = document.getElementById('progress-container');
+            
+            if (data.total_pages > 0) {
+                const progress = (data.pages_scraped.length / data.total_pages) * 100;
+                progressBar.style.width = `${progress}%`;
+                progressBar.textContent = `${Math.round(progress)}%`;
+                
+                // Update pages count
+                document.getElementById('pages-count').textContent = 
+                    `Pages: ${data.pages_scraped.length}/${data.total_pages}`;
+                
+                // Update elapsed time
+                if (startTime) {
+                    const elapsed = Math.round((Date.now() - startTime) / 1000);
+                    document.getElementById('elapsed-time').textContent = 
+                        `Time: ${elapsed}s`;
+                }
+                
+                // Update pages list
+                if (data.pages_scraped.length > pagesList.children.length) {
+                    const newPages = data.pages_scraped.slice(pagesList.children.length);
+                    newPages.forEach(page => {
+                        const li = document.createElement('li');
+                        li.className = 'page-item';
+                        const checkmark = document.createElement('span');
+                        checkmark.className = 'checkmark';
+                        checkmark.textContent = '✓';
+                        li.appendChild(checkmark);
+                        const text = document.createElement('span');
+                        text.textContent = page || 'Untitled Page';
+                        li.appendChild(text);
+                        pagesList.appendChild(li);
+                    });
+                }
+            }
+            
+            progressContainer.classList.remove('hidden');
+        }
+
+        function updateStatusBadge(status) {
+            const badge = document.getElementById('status-badge');
+            badge.className = 'status-badge';
+            
+            switch(status) {
+                case 'running':
+                    badge.classList.add('status-running');
+                    badge.textContent = 'Running';
+                    break;
+                case 'completed':
+                    badge.classList.add('status-completed');
+                    badge.textContent = 'Completed';
+                    break;
+                case 'error':
+                    badge.classList.add('status-error');
+                    badge.textContent = 'Error';
+                    break;
+                case 'rate_limited':
+                    badge.classList.add('status-rate-limited');
+                    badge.textContent = 'Rate Limited';
+                    break;
+            }
+        }
+
+        function showError(message) {
+            const errorContainer = document.getElementById('error-container');
+            errorContainer.textContent = message;
+            errorContainer.classList.remove('hidden');
+            updateStatusBadge('error');
+        }
+
+        function handleResponse(response) {
+            if (!response.ok) {
+                const contentType = response.headers.get('content-type');
+                if (contentType && contentType.includes('application/json')) {
+                    return response.json().then(data => {
+                        throw new Error(data.error || `HTTP error! status: ${response.status}`);
+                    });
+                }
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            return response.json();
+        }
+
+        document.getElementById('download-form').addEventListener('submit', startDownload);
+    </script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+# Log files
+*.log
+
+# Markdown files
+*.md
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Virtual environment
+venv/
+
+# Downloads folder
+downloads/
