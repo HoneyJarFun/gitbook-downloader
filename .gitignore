@@ -10,3 +10,7 @@ venv/
 
 # Downloads folder
 downloads/
+
+# Markdown files except README
+*.md
+!README.md
